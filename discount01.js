@@ -1,7 +1,8 @@
-let url = "https://tate-wriest-france.ngrok-free.dev/";
+let url = "__API_BASE_URL__";
 let shop = Shopify.shop;
 let isInternational = false;
 let scriptReady = false;
+let requestContext;
 
 function getCheckoutElements() {
     const elements = [];
@@ -125,6 +126,46 @@ function fixCartNotificationButton() {
 //    }
 //}
 
+async function decryptAesGcm(payloadBase64, ivBase64, base64Key) {
+
+    function fixBase64(str) {
+        return str
+            .replace(/&#x2B;/g, '+')
+            .replace(/&#x2F;/g, '/')
+            .replace(/\s/g, '')
+            .replace(/-/g, '+')
+            .replace(/_/g, '/');
+    }
+
+    payloadBase64 = fixBase64(payloadBase64);
+    ivBase64 = fixBase64(ivBase64);
+    base64Key = fixBase64(base64Key);
+
+    const keyBytes = Uint8Array.from(atob(base64Key), c => c.charCodeAt(0));
+    const payloadBytes = Uint8Array.from(atob(payloadBase64), c => c.charCodeAt(0));
+    const iv = Uint8Array.from(atob(ivBase64), c => c.charCodeAt(0));
+
+    const cryptoKey = await crypto.subtle.importKey(
+        "raw",
+        keyBytes,
+        "AES-GCM",
+        false,
+        ["decrypt"]
+    );
+
+    const decrypted = await crypto.subtle.decrypt(
+        {
+            name: "AES-GCM",
+            iv: iv,
+            tagLength: 128
+        },
+        cryptoKey,
+        payloadBytes
+    );
+
+    return new TextDecoder().decode(decrypted);
+}
+
 async function isInternationalOrder() {
     try {
         let selectedCountry = null;
@@ -139,8 +180,40 @@ async function isInternationalOrder() {
                 `${url}GiftShip/ShopOrigin?ShopName=${shop}`,
                 { method: 'POST', headers: { 'ngrok-skip-browser-warning': 'true', 'Accept': 'application/json' } }
             );
-            const shopData = await shopResponse.json();
-            shopOrigin = shopData.shop?.billingAddress?.countryCode || 'US';
+
+            if (typeof shopResponse === "string") {
+                response = JSON.parse(shopResponse);
+            }
+
+            const decryptedJson = await decryptAesGcm(
+                response.payLoad,
+                response.iv,
+                requestContext
+            );
+
+            const data = JSON.parse(decryptedJson);
+
+            const billing = data?.shop?.billingAddress;
+
+            let shopInfo;
+
+            if (billing) {
+                shopInfo = {
+                    origin: {
+                        country: billing.countryCode || billing.country || "",
+                        postal_code: billing.zip || "",
+                        province: billing.provinceCode || billing.province || "",
+                        city: billing.city || "",
+                        address1: billing.address1 || "",
+                        name: billing.name || "",
+                        company_name: billing.company || ""
+                    }
+                };
+            } else {
+                shopInfo = { origin: data || {} };
+            }
+
+            shopOrigin = shopInfo.shop?.billingAddress?.countryCode || 'US';
         } catch (apiError) {
             console.warn('Shop origin API failed, using default US', apiError);
         }
