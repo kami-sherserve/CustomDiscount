@@ -1,4 +1,4 @@
-let url = "__API_BASE_URL__";
+let url = "https://tate-wriest-france.ngrok-free.dev/";
 let shop = Shopify.shop;
 let isInternational = false;
 let scriptReady = false;
