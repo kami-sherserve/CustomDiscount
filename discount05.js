@@ -1012,7 +1012,33 @@ let countries = [
         "code": "ZW",
         "name": "Zimbabwe"
     }
-]
+];
+
+function injectCustomStyles() {
+    const style = document.createElement('style');
+    style.textContent = `
+        @media screen and (min-width: 750px) {
+            .cart__ctas {
+                flex-direction: column !important;
+                gap: 1rem;
+            }
+            #gift-ship-country-select {
+                width: 100% !important;
+                max-width: none !important;
+                box-sizing: border-box;
+            }
+        }
+        /* Also style the selector inside the drawer */
+        #gift-ship-country-select-drawer {
+            width: 100%;
+            margin-bottom: 10px;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+    `;
+    document.head.appendChild(style);
+}
 
 function getCheckoutElements() {
     const elements = [];
@@ -1067,8 +1093,9 @@ function setupCheckoutElement(el) {
             window.location.href = `/apps/myapp?CustomCheckout=DiscountCheckout&shop=${shop}`;
             return false;
         }
-        if (originalClick) originalClick.call(el, event);
-        else if (el.tagName === 'A' && originalHref && !event.defaultPrevented) {
+        if (originalClick) {
+            originalClick.call(el, event);
+        } else if (el.tagName === 'A' && originalHref && !event.defaultPrevented) {
             // normal anchor behaviour
         }
     });
@@ -1101,7 +1128,6 @@ function observeButtons() {
                     const original = el.getAttribute('data-original-text');
                     if (original) el.innerHTML = original;
                 } else {
-                    // Keep disabled until country selected
                     el.disabled = true;
                     if (el.tagName === 'A') {
                         el.style.pointerEvents = 'none';
@@ -1124,13 +1150,12 @@ function fixCartNotificationButton() {
     }
 }
 
-function createCountrySelect() {
+// ----- Country selector logic for main cart page -----
+function createCountrySelect(id = 'gift-ship-country-select') {
     const select = document.createElement('select');
-    select.id = 'gift-ship-country-select';
+    select.id = id;
     select.style.margin = '10px 0';
     select.style.padding = '8px';
-    select.style.width = '100%';
-    select.style.maxWidth = '300px';
     select.style.border = '1px solid #ccc';
     select.style.borderRadius = '4px';
 
@@ -1147,27 +1172,87 @@ function createCountrySelect() {
         option.textContent = country.name;
         select.appendChild(option);
     });
-
     return select;
 }
 
-function insertCountrySelector() {
-    if (document.getElementById('gift-ship-country-select')) return;
+async function waitForCheckoutButton() {
+    return new Promise((resolve) => {
+        const check = () => {
+            const btn = document.querySelector('.cart__ctas .cart__checkout-button');
+            if (btn) {
+                resolve(btn);
+                return;
+            }
+            setTimeout(check, 100);
+        };
+        check();
+    });
+}
 
-    const checkoutElements = getCheckoutElements();
-    if (checkoutElements.length === 0) return;
-
-    let targetContainer = null;
-    const cartFooter = document.querySelector('.cart__footer, .cart-footer, #main-cart-footer, .cart-container');
-    if (cartFooter) {
-        targetContainer = cartFooter;
-    } else {
-        targetContainer = checkoutElements[0].parentNode;
-    }
-
-    const select = createCountrySelect();
-    targetContainer.insertBefore(select, checkoutElements[0]);
+async function insertCountrySelectorInCart() {
+    if (document.getElementById('gift-ship-country-select')) return null;
+    const checkoutBtn = await waitForCheckoutButton();
+    if (!checkoutBtn) return null;
+    const parent = checkoutBtn.parentNode;
+    const select = createCountrySelect('gift-ship-country-select');
+    parent.insertBefore(select, checkoutBtn);
     return select;
+}
+
+// ----- NEW: Drawer support -----
+async function insertCountrySelectorInDrawer() {
+    const drawer = document.getElementById('cart-notification');
+    if (!drawer) return null;
+    // Already inserted?
+    if (document.getElementById('gift-ship-country-select-drawer')) return null;
+
+    const checkoutBtn = drawer.querySelector('button[name="checkout"]');
+    if (!checkoutBtn) return null;
+
+    // Find the container inside the drawer where the button resides
+    let container = checkoutBtn.parentNode;
+    while (container && !container.classList?.contains('cart-notification__links')) {
+        container = container.parentNode;
+    }
+    if (!container) container = checkoutBtn.parentNode;
+
+    const select = createCountrySelect('gift-ship-country-select-drawer');
+    // Insert the select above the button (or inside container, above the button)
+    container.insertBefore(select, checkoutBtn);
+    return select;
+}
+
+function observeDrawer() {
+    const observer = new MutationObserver((mutations) => {
+        for (let mutation of mutations) {
+            if (mutation.type === 'childList') {
+                for (let node of mutation.addedNodes) {
+                    if (node.nodeType === 1 && node.id === 'cart-notification') {
+                        // Drawer appeared – insert selector after a short delay (DOM must settle)
+                        setTimeout(() => insertCountrySelectorInDrawer().then(select => {
+                            if (select && window.countrySelectListener) {
+                                select.addEventListener('change', window.countrySelectListener);
+                                // If country already selected elsewhere, pre-select and trigger
+                                if (window.currentSelectedCountry) {
+                                    select.value = window.currentSelectedCountry;
+                                    select.dispatchEvent(new Event('change'));
+                                } else {
+                                    // Disable drawer's checkout button until selection
+                                    const drawerBtn = document.querySelector('#cart-notification button[name="checkout"]');
+                                    if (drawerBtn) {
+                                        drawerBtn.disabled = true;
+                                        drawerBtn.innerHTML = 'Select a country above';
+                                    }
+                                }
+                            }
+                        }), 100);
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
 }
 
 async function getShopOrigin() {
@@ -1189,6 +1274,15 @@ async function handleCountrySelection(selectedCode, shopOrigin) {
     isInternational = (selectedCode !== shopOrigin);
     scriptReady = true;
     disableCheckoutElements(false);
+
+    // Also enable the drawer's checkout button if it exists
+    const drawerBtn = document.querySelector('#cart-notification button[name="checkout"]');
+    if (drawerBtn) {
+        drawerBtn.disabled = false;
+        const original = drawerBtn.getAttribute('data-original-text');
+        if (original) drawerBtn.innerHTML = original;
+        else drawerBtn.innerHTML = 'Check out';
+    }
     return true;
 }
 
@@ -1213,28 +1307,53 @@ function hideProductOptions() {
 (async () => {
     if (!(url && shop)) return;
 
+    injectCustomStyles();
     hideSpecificButtons();
     disableCheckoutElements(true, 'Select a country above');
 
     await domReady();
     fixCartNotificationButton();
 
-    const countrySelect = insertCountrySelector();
-    if (!countrySelect) {
-        console.warn('Could not insert country selector – checkout may stay disabled');
-        return;
-    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // Insert selector on main cart page
+    const countrySelect = await insertCountrySelectorInCart();
+    // Watch for drawer to appear
+    observeDrawer();
 
     const shopOrigin = await getShopOrigin();
+    let currentSelectedCountry = null;
 
-    countrySelect.addEventListener('change', async (e) => {
+    // Shared change listener
+    const changeListener = async (e) => {
         const selectedCode = e.target.value;
+        currentSelectedCountry = selectedCode;
         if (!selectedCode) {
             disableCheckoutElements(true, 'Select a country above');
             scriptReady = false;
+            // Also disable drawer button
+            const drawerBtn = document.querySelector('#cart-notification button[name="checkout"]');
+            if (drawerBtn) {
+                drawerBtn.disabled = true;
+                drawerBtn.innerHTML = 'Select a country above';
+            }
             return;
         }
         await handleCountrySelection(selectedCode, shopOrigin);
+        // Sync any other selectors (drawer) to the same value
+        document.querySelectorAll('#gift-ship-country-select, #gift-ship-country-select-drawer').forEach(sel => {
+            if (sel !== e.target) sel.value = selectedCode;
+        });
+    };
+    window.countrySelectListener = changeListener;
+
+    if (countrySelect) {
+        countrySelect.addEventListener('change', changeListener);
+    }
+
+    // If drawer already exists (e.g., on cart page), insert selector now
+    await insertCountrySelectorInDrawer().then(select => {
+        if (select) select.addEventListener('change', changeListener);
     });
 
     observeButtons();
